@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="2">
+    <name>registration_visualizer</name>
+    <version>0.0.0</version>
+    <description>PointCloud registration visualization package</description>
+    <maintainer email="tomoya.sato@map4.jp">Tomoya-Sato</maintainer>
+    <license>MIT</license>
+
+    <buildtool_depend>catkin</buildtool_depend>
+
+    <depend>fast_gicp</depend>
+
+    <export>
+    </export>
+</package>
