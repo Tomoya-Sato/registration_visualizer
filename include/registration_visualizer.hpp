@@ -69,6 +69,7 @@ private:
 
   // Visualize
   float intensity_range_ = 60.0f;
+  float scale_ = 1.0f;
   int iteration_ = 0;
   double score_ = 0.0;
   bool converged_ = false;

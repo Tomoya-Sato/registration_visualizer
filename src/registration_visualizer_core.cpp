@@ -8,6 +8,7 @@
 
 #include <glk/pointcloud_buffer.hpp>
 #include <glk/pointcloud_buffer_pcl.hpp>
+#include <guik/model_control.hpp>
 
 #include <portable-file-dialogs.h>
 
@@ -46,7 +47,7 @@ void RegistrationVisualizer::viewerLoop()
   auto viewer = guik::LightViewer::instance();
 
   viewer->set_max_text_buffer_size(5);
-  // viewer->use_arcball_camera_control();
+  viewer->use_arcball_camera_control();
 
   viewer->register_ui_callback("1-cloud_loader", [&]() {
     if (ImGui::Button("Load Target Cloud"))
@@ -74,6 +75,7 @@ void RegistrationVisualizer::viewerLoop()
   viewer->register_ui_callback("2-Console", [&]() {
     ImGui::DragFloat("Target Leaf Size", &target_leaf_size_, 0.01f, 0.0f, 3.0f);
     ImGui::DragFloat("Source Leaf Size", &source_leaf_size_, 0.01f, 0.0f, 3.0f);
+    ImGui::DragFloat("Resolution", &resolution_, 0.01f, 0.0, 3.0f);
 
     if (ImGui::Checkbox("FastGICP", &use_gicp_) && use_gicp_)
       use_vgicp_ = use_vgicp_cuda_ = use_pcl_ndt_ = false;
@@ -112,6 +114,19 @@ void RegistrationVisualizer::viewerLoop()
       return false;
 
     return true;
+  });
+
+  // Guizmo
+  Eigen::Matrix4f init_model_matrix = Eigen::Matrix4f::Identity();
+  guik::ModelControl model_control("model_control", init_model_matrix);
+
+  viewer->register_ui_callback("model_control_ui", [&]{
+    model_control.draw_gizmo_ui();
+    model_control.draw_gizmo();
+
+    guess_matrix_ = model_control.model_matrix();
+    std::lock_guard<std::mutex> lock(mtx_);
+    is_source_cloud_update_ = true;
   });
 
   while (viewer->spin_once() && !viewer_closed_)
@@ -163,11 +178,11 @@ void RegistrationVisualizer::applyVGF(const pcl::PointCloud<pcl::PointXYZI>::Ptr
 
 void RegistrationVisualizer::checkTargetName()
 {
-  std::lock_guard<std::mutex> lock(mtx_);
   if (is_target_name_update_)
   {
     target_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::io::loadPCDFile(target_cloud_name_, *target_cloud_ptr_);
+    std::lock_guard<std::mutex> lock(mtx_);
     is_target_cloud_update_ = true;
     is_target_name_update_ = false;
     is_target_set_ = true;
@@ -176,11 +191,11 @@ void RegistrationVisualizer::checkTargetName()
 
 void RegistrationVisualizer::checkSourceName()
 {
-  std::lock_guard<std::mutex> lock(mtx_);
   if (is_source_name_update_)
   {
     source_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::io::loadPCDFile(source_cloud_name_, *source_cloud_ptr_);
+    std::lock_guard<std::mutex> lock(mtx_);
     is_source_cloud_update_ = true;
     is_source_name_update_ = false;
     is_source_set_ = true;
@@ -286,8 +301,7 @@ void RegistrationVisualizer::checkAlign()
 
 void RegistrationVisualizer::checkTargetCloud(const std::shared_ptr<guik::LightViewer>& viewer)
 {
-  std::lock_guard<std::mutex> lock(mtx_);
-  if (is_target_cloud_update_)
+  if (is_target_cloud_update_ && is_target_set_)
   {
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     int cloud_size = target_cloud_ptr_->size();
@@ -302,16 +316,16 @@ void RegistrationVisualizer::checkTargetCloud(const std::shared_ptr<guik::LightV
 
     auto cloud_buffer = glk::create_point_cloud_buffer(*xyz_cloud);
     cloud_buffer->add_color(getColorVec(intensity_vec, intensity_range_, 1.0f)[0].data(), sizeof(Eigen::Vector4f), cloud_size);
-    viewer->update_drawable("target_cloud", cloud_buffer, guik::VertexColor().add("point_scale", 0.1f));
+    viewer->update_drawable("target_cloud", cloud_buffer, guik::FlatColor(1.0f, 1.0f, 1.0f, 1.0f).add("point_scale", scale_));
 
+    std::lock_guard<std::mutex> lock(mtx_);
     is_target_cloud_update_ = false;
   }
 }
 
 void RegistrationVisualizer::checkSourceCloud(const std::shared_ptr<guik::LightViewer>& viewer)
 {
-  std::lock_guard<std::mutex> lock(mtx_);
-  if (is_source_cloud_update_)
+  if (is_source_cloud_update_ && is_source_set_)
   {
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     int cloud_size = source_cloud_ptr_->size();
@@ -326,8 +340,9 @@ void RegistrationVisualizer::checkSourceCloud(const std::shared_ptr<guik::LightV
 
     auto cloud_buffer = glk::create_point_cloud_buffer(*xyz_cloud);
     cloud_buffer->add_color(getColorVec(intensity_vec, intensity_range_, 1.0f)[0].data(), sizeof(Eigen::Vector4f), cloud_size);
-    viewer->update_drawable("source_cloud", cloud_buffer, guik::VertexColor(guess_matrix_).add("point_scale", 0.1f));
+    viewer->update_drawable("source_cloud", cloud_buffer, guik::FlatColor(0.0f, 1.0f, 0.0f, 1.0f, guess_matrix_).add("point_scale", scale_));
 
+    std::lock_guard<std::mutex> lock(mtx_);
     is_source_cloud_update_ = false;
   }
 }
@@ -350,7 +365,7 @@ void RegistrationVisualizer::checkAlignedCloud(const std::shared_ptr<guik::Light
 
     auto cloud_buffer = glk::create_point_cloud_buffer(*xyz_cloud);
     cloud_buffer->add_color(getColorVec(intensity_vec, intensity_range_, 1.0f)[0].data(), sizeof(Eigen::Vector4f), cloud_size);
-    viewer->update_drawable("aligned_cloud", cloud_buffer, guik::VertexColor(aligned_matrix_).add("point_scale", 0.1f));
+    viewer->update_drawable("aligned_cloud", cloud_buffer, guik::FlatColor(1.0f, 0.0f, 0.0f, 1.0f, aligned_matrix_).add("point_scale", scale_));
 
     is_aligned_cloud_update_ = false;
   }
