@@ -12,6 +12,10 @@
 #include <portable-file-dialogs.h>
 
 #include <fast_gicp/gicp/fast_gicp.hpp>
+#include <fast_gicp/gicp/fast_vgicp.hpp>
+#ifdef USE_VGICP_CUDA
+#include <fast_gicp/gicp/fast_vgicp_cuda.hpp>
+#endif
 
 namespace visualizer
 {
@@ -41,9 +45,10 @@ void RegistrationVisualizer::viewerLoop()
 {
   auto viewer = guik::LightViewer::instance();
 
-  viewer->set_max_text_buffer_size(4);
+  viewer->set_max_text_buffer_size(5);
+  // viewer->use_arcball_camera_control();
 
-  viewer->register_ui_callback("cloud_loader", [&]() {
+  viewer->register_ui_callback("1-cloud_loader", [&]() {
     if (ImGui::Button("Load Target Cloud"))
     {
       std::vector<std::string> results = pfd::open_file("choose PCD file").result();
@@ -66,18 +71,27 @@ void RegistrationVisualizer::viewerLoop()
     }
   });
 
-  viewer->register_ui_callback("Console", [&]() {
+  viewer->register_ui_callback("2-Console", [&]() {
     ImGui::DragFloat("Target Leaf Size", &target_leaf_size_, 0.01f, 0.0f, 3.0f);
     ImGui::DragFloat("Source Leaf Size", &source_leaf_size_, 0.01f, 0.0f, 3.0f);
+
+    if (ImGui::Checkbox("FastGICP", &use_gicp_) && use_gicp_)
+      use_vgicp_ = use_vgicp_cuda_ = use_pcl_ndt_ = false;
+
+    if (ImGui::Checkbox("FastVGICP", &use_vgicp_) && use_vgicp_)
+      use_gicp_ = use_vgicp_cuda_ = use_pcl_ndt_ = false;
+
+    if (ImGui::Checkbox("FastVGICPCuda", &use_vgicp_cuda_) && use_vgicp_cuda_)
+      use_gicp_ = use_vgicp_ = use_pcl_ndt_ = false;
+
+    if (ImGui::Checkbox("PCL_NDT", &use_pcl_ndt_) && use_pcl_ndt_)
+      use_gicp_ = use_vgicp_ = use_vgicp_cuda_ = false;
 
     if (ImGui::Button("Align"))
       do_align_ = true;
 
     if (ImGui::Button("Close"))
-    {
-      viewer->close();
       viewer_closed_ = true;
-    }
   });
 
   bool draw_target = true;
@@ -107,6 +121,8 @@ void RegistrationVisualizer::viewerLoop()
     checkAlignedCloud(viewer);
     checkScore(viewer);
   }
+
+  viewer->destroy();
 }
 
 void RegistrationVisualizer::run()
@@ -173,51 +189,95 @@ void RegistrationVisualizer::checkSourceName()
 
 void RegistrationVisualizer::checkAlign()
 {
-  std::lock_guard<std::mutex> lock(mtx_);
   if (do_align_ && is_target_set_ && is_source_set_)
   {
-    std::cout << "Align" << std::endl;
-
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_target_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
     applyVGF(target_cloud_ptr_, *filtered_target_cloud_ptr, target_leaf_size_);
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_source_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
     applyVGF(source_cloud_ptr_, *filtered_source_cloud_ptr, source_leaf_size_);
 
-    fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> gicp;
-    gicp.setMaxCorrespondenceDistance(1.0);
-    gicp.setInputTarget(filtered_target_cloud_ptr);
-    gicp.setInputSource(filtered_source_cloud_ptr);
+    std::chrono::time_point<std::chrono::system_clock> c_start, c_end;
+    c_start = std::chrono::system_clock::now();
 
-    pcl::PointCloud<pcl::PointXYZ> dummy;
-    gicp.align(dummy, guess_matrix_);
+    // if (method_ == METHOD::FastGICP)
+    if (use_gicp_)
+    {
+      fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> gicp;
+      gicp.setMaxCorrespondenceDistance(1.0);
+      gicp.setInputTarget(filtered_target_cloud_ptr);
+      gicp.setInputSource(filtered_source_cloud_ptr);
 
-    aligned_matrix_ = gicp.getFinalTransformation();
-    iteration_ = 0;
-    score_ = gicp.getFitnessScore();
-    converged_ = gicp.hasConverged();
+      pcl::PointCloud<pcl::PointXYZ> dummy;
+      gicp.align(dummy, guess_matrix_);
 
-    // pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt;
-    // ndt.setTransformationEpsilon(0.01);
-    // ndt.setStepSize(0.1);
-    // ndt.setResolution(2.0);
-    // ndt.setMaximumIterations(100);
+      aligned_matrix_ = gicp.getFinalTransformation();
+      iteration_ = -1;
+      score_ = gicp.getFitnessScore();
+      converged_ = gicp.hasConverged();
+    }
+    // else if (method_ == METHOD::FastVGICP)
+    else if (use_vgicp_)
+    {
+      fast_gicp::FastVGICP<pcl::PointXYZ, pcl::PointXYZ> vgicp;
+      vgicp.setResolution(resolution_);
 
-    // ndt.setInputTarget(filtered_target_cloud_ptr);
-    // ndt.setInputSource(filtered_source_cloud_ptr);
+      vgicp.setInputTarget(filtered_target_cloud_ptr);
+      vgicp.setInputSource(filtered_source_cloud_ptr);
 
-    // pcl::io::savePCDFileBinary("test_target.pcd", *filtered_target_cloud_ptr);
-    // pcl::io::savePCDFileBinary("test_source.pcd", *filtered_source_cloud_ptr);
+      pcl::PointCloud<pcl::PointXYZ> dummy;
+      vgicp.align(dummy, guess_matrix_);
 
-    // pcl::PointCloud<pcl::PointXYZ> dummy;
-    // ndt.align(dummy, guess_matrix_);
+      aligned_matrix_ = vgicp.getFinalTransformation();
+      iteration_ = -1;
+      score_ = vgicp.getFitnessScore();
+      converged_ = vgicp.hasConverged();
+    }
+#ifdef USE_VGICP_CUDA
+    // else if (method_ == METHOD::FastVGICPCuda)
+    else if (use_vgicp_cuda_)
+    {
+      fast_gicp::FastVGICPCuda<pcl::PointXYZ, pcl::PointXYZ> vgicp;
 
-    // aligned_matrix_ = ndt.getFinalTransformation();
-    // iteration_ = 0; // ndt.getFinalNumIteration();
-    // score_ = 0; // ndt.getTransformationProbability();
-    // converged_ = ndt.hasConverged();
+      vgicp.setResolution(resolution_);
+      vgicp.setTransformationEpsilon(epsilon_);
 
-    std::cout << aligned_matrix_ << std::endl;
+      vgicp.setInputTarget(filtered_target_cloud_ptr);
+      vgicp.setInputSource(filtered_source_cloud_ptr);
 
+      pcl::PointCloud<pcl::PointXYZ> dummy;
+      vgicp.align(dummy, guess_matrix_);
+
+      aligned_matrix_ = vgicp.getFinalTransformation();
+      iteration_ = 0;
+      score_ = vgicp.getFitnessScore();
+      converged_ = vgicp.hasConverged();
+    }
+#endif
+    else // if (use_pcl_ndt_)
+    {
+      pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt;
+
+      ndt.setResolution(resolution_);
+      ndt.setTransformationEpsilon(epsilon_);
+      ndt.setStepSize(0.1);
+      ndt.setMaximumIterations(30);
+
+      ndt.setInputTarget(filtered_target_cloud_ptr);
+      ndt.setInputSource(filtered_source_cloud_ptr);
+
+      pcl::PointCloud<pcl::PointXYZ> dummy;
+      ndt.align(dummy, guess_matrix_);
+
+      aligned_matrix_ = ndt.getFinalTransformation();
+      iteration_ = ndt.getFinalNumIteration();
+      score_ = ndt.getTransformationProbability();
+      converged_ = ndt.hasConverged();
+    }
+
+    c_end = std::chrono::system_clock::now();
+    time_ = std::chrono::duration_cast<std::chrono::microseconds>(c_end - c_start).count() / 1000.0;
+
+    std::lock_guard<std::mutex> lock(mtx_);
     is_aligned_cloud_update_ = true;
     is_score_update_ = true;
     do_align_ = false;
@@ -301,10 +361,11 @@ void RegistrationVisualizer::checkScore(const std::shared_ptr<guik::LightViewer>
   std::lock_guard<std::mutex> lock(mtx_);
   if (is_score_update_)
   {
-    std::string text = "NDT Score\n";
+    std::string text = "Registration Score\n";
     text = text + "Iteration: " + std::to_string(iteration_) + "\n";
     text = text + "Score    : " + std::to_string(score_) + "\n";
-    text = text + "Converged: " + std::to_string(converged_);
+    text = text + "Converged: " + std::to_string(converged_) + "\n";
+    text = text + "Duration : " + std::to_string(time_);
     viewer->append_text(text);
     is_score_update_ = false;
   }

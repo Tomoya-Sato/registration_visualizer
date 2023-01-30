@@ -13,6 +13,14 @@
 
 namespace visualizer
 {
+enum class METHOD
+{
+  FastGICP = 0,
+  FastVGICP = 1,
+  FastVGICPCuda = 2,
+  PCL_NDT= 3,
+};
+
 class RegistrationVisualizer
 {
 public:
@@ -38,6 +46,19 @@ private:
   bool is_source_set_ = false;
   bool is_target_set_ = false;
 
+  // Method
+  METHOD method_;
+  bool use_gicp_ = true;
+  bool use_vgicp_ = false;
+  bool use_vgicp_cuda_ = false;
+  bool use_pcl_ndt_ = false;
+
+  // Params
+  float resolution_ = 1.0;
+  float epsilon_ = 0.01;
+  float target_leaf_size_ = 0.1;
+  float source_leaf_size_ = 1.0;
+
   // Mutex
   std::mutex mtx_;
 
@@ -47,12 +68,11 @@ private:
   bool viewer_closed_ = true;
 
   // Visualize
-  float intensity_range_ = 7000.0f;
-  float target_leaf_size_ = 0.1;
-  float source_leaf_size_ = 1.0;
+  float intensity_range_ = 60.0f;
   int iteration_ = 0;
   double score_ = 0.0;
   bool converged_ = false;
+  double time_;
 
   void applyVGF(const pcl::PointCloud<pcl::PointXYZI>::Ptr& input, pcl::PointCloud<pcl::PointXYZ>& output, const double& leaf_size);
 
