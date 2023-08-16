@@ -1,0 +1,3 @@
+[submodule "thirdparty/--recursive"]
+	path = thirdparty/--recursive
+	url = git@github.com:SMRT-AIST/fast_gicp.git

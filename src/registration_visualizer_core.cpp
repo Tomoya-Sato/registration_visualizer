@@ -1,6 +1,7 @@
 #include "registration_visualizer.hpp"
 
 #include <boost/bind.hpp>
+#include <boost/filesystem.hpp>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/registration/ndt.h>
@@ -33,6 +34,13 @@ std::vector<Eigen::Vector4f, Eigen::aligned_allocator<Eigen::Vector4f>> getColor
 
 RegistrationVisualizer::RegistrationVisualizer()
 {
+  for (const auto& entry : boost::filesystem::directory_iterator(std::string("/home/tomoya/sandbox/map4_engine/debug/")))
+  {
+    if (boost::filesystem::is_directory(entry.path()))
+      directories_.push_back(entry.path().string());
+  }
+  std::sort(directories_.begin(), directories_.end());
+
   guess_matrix_ = Eigen::Matrix4f::Identity();
   viewer_closed_ = false;
   viewer_thread_ = std::thread(boost::bind(&RegistrationVisualizer::viewerLoop, this));
@@ -76,6 +84,17 @@ void RegistrationVisualizer::viewerLoop()
     ImGui::DragFloat("Target Leaf Size", &target_leaf_size_, 0.01f, 0.0f, 3.0f);
     ImGui::DragFloat("Source Leaf Size", &source_leaf_size_, 0.01f, 0.0f, 3.0f);
     ImGui::DragFloat("Resolution", &resolution_, 0.01f, 0.0, 3.0f);
+    ImGui::DragFloat("Correspondence Distance", &correspondence_distance_, 0.1f, 0.0, 10.0f);
+    if (ImGui::DragFloat("Intensity Threshold", &intensity_thresh_, 1.0f, 0.0f, 255.0f))
+    {
+      is_source_cloud_update_ = true;
+      is_target_cloud_update_ = true;
+    }
+    if (ImGui::DragFloat("Height Threshold", &z_thresh_, 0.1f, 0.0f, 10.0f))
+    {
+      is_source_cloud_update_ = true;
+      is_target_cloud_update_ = true;
+    }
 
     if (ImGui::Checkbox("FastGICP", &use_gicp_) && use_gicp_)
       use_vgicp_ = use_vgicp_cuda_ = use_pcl_ndt_ = false;
@@ -94,6 +113,17 @@ void RegistrationVisualizer::viewerLoop()
 
     if (ImGui::Button("Close"))
       viewer_closed_ = true;
+
+    if (ImGui::Button("Next"))
+    {
+      dir_idx_++;
+      std::lock_guard<std::mutex> lock(mtx_);
+      target_cloud_name_ = directories_[dir_idx_] + "/target.pcd";
+      source_cloud_name_ = directories_[dir_idx_] + "/source_ali.pcd";
+      is_target_name_update_ = true;
+      is_source_name_update_ = true;
+      viewer->append_text(directories_[dir_idx_]);
+    }
   });
 
   bool draw_target = true;
@@ -180,8 +210,17 @@ void RegistrationVisualizer::checkTargetName()
 {
   if (is_target_name_update_)
   {
-    target_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
-    pcl::io::loadPCDFile(target_cloud_name_, *target_cloud_ptr_);
+    target_master_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::io::loadPCDFile(target_cloud_name_, *target_master_cloud_ptr_);
+
+    // Intensity normalization
+    float max_intensity = 0;
+    for (const auto& p : *target_master_cloud_ptr_)
+      max_intensity = (p.intensity > max_intensity) ? p.intensity : max_intensity;
+
+    for (auto& p : *target_master_cloud_ptr_)
+      p.intensity = p.intensity / max_intensity * 255.0;
+
     std::lock_guard<std::mutex> lock(mtx_);
     is_target_cloud_update_ = true;
     is_target_name_update_ = false;
@@ -193,8 +232,17 @@ void RegistrationVisualizer::checkSourceName()
 {
   if (is_source_name_update_)
   {
-    source_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
-    pcl::io::loadPCDFile(source_cloud_name_, *source_cloud_ptr_);
+    source_master_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::io::loadPCDFile(source_cloud_name_, *source_master_cloud_ptr_);
+
+    // Intensity normalization
+    float max_intensity = 0;
+    for (const auto& p : *source_master_cloud_ptr_)
+      max_intensity = (p.intensity > max_intensity) ? p.intensity : max_intensity;
+
+    for (auto& p : *source_master_cloud_ptr_)
+      p.intensity = p.intensity / max_intensity * 255.0;
+
     std::lock_guard<std::mutex> lock(mtx_);
     is_source_cloud_update_ = true;
     is_source_name_update_ = false;
@@ -206,6 +254,10 @@ void RegistrationVisualizer::checkAlign()
 {
   if (do_align_ && is_target_set_ && is_source_set_)
   {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_master_target_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
+    applyVGF(target_master_cloud_ptr_, *filtered_master_target_cloud_ptr, target_leaf_size_);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_master_source_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
+    applyVGF(source_master_cloud_ptr_, *filtered_master_source_cloud_ptr, source_leaf_size_);
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_target_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
     applyVGF(target_cloud_ptr_, *filtered_target_cloud_ptr, target_leaf_size_);
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_source_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
@@ -218,11 +270,20 @@ void RegistrationVisualizer::checkAlign()
     if (use_gicp_)
     {
       fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> gicp;
-      gicp.setMaxCorrespondenceDistance(1.0);
-      gicp.setInputTarget(filtered_target_cloud_ptr);
-      gicp.setInputSource(filtered_source_cloud_ptr);
+      gicp.setMaxCorrespondenceDistance(correspondence_distance_);
+
+      // gicp.setInputTarget(filtered_master_target_cloud_ptr);
+      // gicp.setInputSource(filtered_master_source_cloud_ptr);
 
       pcl::PointCloud<pcl::PointXYZ> dummy;
+      // gicp.align(dummy, guess_matrix_);
+
+      // aligned_matrix_ = gicp.getFinalTransformation();
+
+      gicp.setInputTarget(filtered_target_cloud_ptr);
+      gicp.setInputSource(filtered_source_cloud_ptr);
+      gicp.setMaximumIterations(100);
+
       gicp.align(dummy, guess_matrix_);
 
       aligned_matrix_ = gicp.getFinalTransformation();
@@ -303,6 +364,13 @@ void RegistrationVisualizer::checkTargetCloud(const std::shared_ptr<guik::LightV
 {
   if (is_target_cloud_update_ && is_target_set_)
   {
+    target_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+    for (const auto& p : *target_master_cloud_ptr_)
+    {
+      if (p.intensity >= intensity_thresh_ && p.z <= z_thresh_)
+        target_cloud_ptr_->push_back(p);
+    }
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     int cloud_size = target_cloud_ptr_->size();
     xyz_cloud->resize(cloud_size);
@@ -327,6 +395,13 @@ void RegistrationVisualizer::checkSourceCloud(const std::shared_ptr<guik::LightV
 {
   if (is_source_cloud_update_ && is_source_set_)
   {
+    source_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+    for (const auto& p : *source_master_cloud_ptr_)
+    {
+      if (p.intensity >= intensity_thresh_ && p.z <= z_thresh_)
+        source_cloud_ptr_->push_back(p);
+    }
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr xyz_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     int cloud_size = source_cloud_ptr_->size();
     xyz_cloud->resize(cloud_size);

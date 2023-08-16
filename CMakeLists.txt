@@ -3,7 +3,10 @@ project(registration_visualizer)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
+add_subdirectory(thirdparty/fast_gicp)
+
 find_package(PCL REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(Iridescence REQUIRED)
 
 # Enable support for C++17
@@ -14,24 +17,17 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
 endif()
 
-find_package(Eigen3 REQUIRED)
-find_package(catkin REQUIRED COMPONENTS
-  fast_gicp
-)
-
-catkin_package(
-  CATKIN_DEPENDS fast_gicp
-  INCLUDE_DIRS include
-  DEPENDS PCL Iridescence
-)
-
-include_directories(
+file(GLOB SRC src/*.cpp)
+add_executable(registration_visualizer ${SRC})
+target_include_directories(registration_visualizer PUBLIC
   include
+  thirdparty/fast_gicp/include
   ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
   ${Iridescence_INCLUDE_DIRS}
 )
-
-file(GLOB SRC src/*.cpp)
-add_executable(registration_visualizer ${SRC})
-target_link_libraries(registration_visualizer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${Iridescence_LIBRARIES})
+target_link_libraries(registration_visualizer PUBLIC
+  fast_gicp
+  ${PCL_LIBRARIES}
+  ${Iridescence_LIBRARIES}
+)
